@@ -2,118 +2,94 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include <BLEBeacon.h>
 
-#define DEVICE_NAME         "ESP32C6"
-#define SERVICE_UUID        "7A0247E7-8E88-409B-A959-AB5092DDB03E"
-#define BEACON_UUID         "2D7A9F0C-E0E8-4CC9-A71B-A21DB2D034A1"
-#define BEACON_UUID_REV     "A134D0B2-1DA2-1BA7-C94C-E8E00C9F7A2D"
-#define CHARACTERISTIC_UUID "82258BAA-DF72-47E8-99BC-B73D7ECD08A5"
+#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-BLEServer *pServer;
-BLECharacteristic *pCharacteristic;
+BLEServer *pServer = NULL;
+BLECharacteristic *pTxCharacteristic;
 bool deviceConnected = false;
-uint8_t value = 0;
 
-class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer *pServer) {
-    deviceConnected = true;
-    Serial.println("deviceConnected = true");
-  };
-
-  void onDisconnect(BLEServer *pServer) {
-    deviceConnected = false;
-    Serial.println("deviceConnected = false");
-
-    // Restart advertising to be visible and connectable again
-    BLEAdvertising *pAdvertising;
-    pAdvertising = pServer->getAdvertising();
-    pAdvertising->start();
-    Serial.println("iBeacon advertising restarted");
-  }
-};
-
-class MyCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) {
-    String rxValue = pCharacteristic->getValue();
-
-    if (rxValue.length() > 0) {
-      Serial.println("*********");
-      Serial.print("Received Value: ");
-      for (int i = 0; i < rxValue.length(); i++) {
-        Serial.print(rxValue[i]);
-      }
-      Serial.println();
-      Serial.println("*********");
+class ServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+        Serial.println("Device connected");
     }
-  }
+
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+        Serial.println("Device disconnected");
+    }
 };
 
-void init_service() {
-  BLEAdvertising *pAdvertising;
-  pAdvertising = pServer->getAdvertising();
-  pAdvertising->stop();
+class RxCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        String rxValue = pCharacteristic->getValue().c_str();
+        if (rxValue.length() > 0) {
+            Serial.write(rxValue.c_str(), rxValue.length());
+        }
+    }
+};
 
-  // Create the BLE Service
-  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID));
+void setupBLE() {
+    BLEDevice::init("ESP32_BLE_UART");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
 
-  // Create a BLE Characteristic
-  pCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
-  );
-  pCharacteristic->setCallbacks(new MyCallbacks());
-  pCharacteristic->addDescriptor(new BLE2902());
+    BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  pAdvertising->addServiceUUID(BLEUUID(SERVICE_UUID));
+    pTxCharacteristic = pService->createCharacteristic(
+                            CHARACTERISTIC_UUID_TX,
+                            BLECharacteristic::PROPERTY_NOTIFY
+                        );
+    pTxCharacteristic->addDescriptor(new BLE2902());
 
-  // Start the service
-  pService->start();
+    BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
+                                               CHARACTERISTIC_UUID_RX,
+                                               BLECharacteristic::PROPERTY_WRITE
+                                           );
+    pRxCharacteristic->setCallbacks(new RxCallbacks());
 
-  pAdvertising->start();
-}
+    pService->start();
 
-void init_beacon() {
-  BLEAdvertising *pAdvertising;
-  pAdvertising = pServer->getAdvertising();
-  pAdvertising->stop();
-  // iBeacon
-  BLEBeacon myBeacon;
-  myBeacon.setManufacturerId(0x4c00);
-  myBeacon.setMajor(5);
-  myBeacon.setMinor(88);
-  myBeacon.setSignalPower(0xc5);
-  myBeacon.setProximityUUID(BLEUUID(BEACON_UUID_REV));
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
+    pAdvertising->setMinPreferred(0x12);
+    BLEDevice::startAdvertising();
 
-  BLEAdvertisementData advertisementData;
-  advertisementData.setFlags(0x1A);
-  advertisementData.setManufacturerData(myBeacon.getData());
-  pAdvertising->setAdvertisementData(advertisementData);
-
-  pAdvertising->start();
+    Serial.println("BLE device initialized and advertising");
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println();
-  Serial.println("Initializing...");
-  Serial.flush();
+    Serial.begin(115200);
+    while (!Serial) {
+        ; // 等待串口连接
+    }
+    Serial.println("Serial started");
 
-  BLEDevice::init(DEVICE_NAME);
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-
-  init_service();
-  init_beacon();
-
-  Serial.println("iBeacon + service defined and advertising!");
+    setupBLE();
+    Serial.println("BLE UART Transparent Transmission Ready");
 }
 
 void loop() {
-  if (deviceConnected) {
-    Serial.printf("*** NOTIFY: %d ***\n", value);
-    pCharacteristic->setValue(&value, 1);
-    pCharacteristic->notify();
-    value++;
-  }
-  delay(2000);
+    if (deviceConnected && Serial.available()) {
+        size_t len = Serial.available();
+        uint8_t buffer[128];
+        len = Serial.readBytes(buffer, min(len, sizeof(buffer)));
+        pTxCharacteristic->setValue(buffer, len);
+        pTxCharacteristic->notify();
+    }
+
+    // 如果设备未连接，每5秒重新开始广播
+    static unsigned long lastAdvertisingTime = 0;
+    if (!deviceConnected && millis() - lastAdvertisingTime > 5000) {
+        BLEDevice::startAdvertising();
+        Serial.println("Restarting advertising");
+        lastAdvertisingTime = millis();
+    }
+
+    delay(10);
 }
